@@ -3,57 +3,76 @@ import { useEffect, useRef, useState, useCallback } from "react";
 export type WakeWordState = "standby" | "activated" | "listening" | "off";
 
 interface UseWakeWordOptions {
+  enabled: boolean;
   onCommand: (transcript: string) => void;
   wakeWords?: string[];
 }
 
-const WAKE_WORDS = ["jarvis", "jarviis", "hey jarvis", "hey jarviis", "ok jarvis", "jarvis,"];
+const WAKE_WORDS = ["jarvis", "jarviis", "hey jarvis", "ok jarvis", "jarvis,"];
 
-export function useWakeWord({ onCommand, wakeWords = WAKE_WORDS }: UseWakeWordOptions) {
-  const [wakeState, setWakeState] = useState<WakeWordState>("standby");
+export function useWakeWord({
+  enabled,
+  onCommand,
+  wakeWords = WAKE_WORDS,
+}: UseWakeWordOptions) {
+  const [wakeState, setWakeState] = useState<WakeWordState>("off");
   const [liveTranscript, setLiveTranscript] = useState("");
   const [supported, setSupported] = useState(true);
 
   const recognitionRef   = useRef<SpeechRecognition | null>(null);
-  const wakeStateRef     = useRef<WakeWordState>("standby");
+  const wakeStateRef     = useRef<WakeWordState>("off");
   const restartTimerRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
   const commandBufferRef = useRef("");
   const silenceTimerRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef       = useRef(true);
 
-  const setWakeStateSynced = useCallback((s: WakeWordState) => {
+  const setWS = useCallback((s: WakeWordState) => {
     wakeStateRef.current = s;
     if (mountedRef.current) setWakeState(s);
   }, []);
 
-  const startRecognition = useCallback(() => {
+  const startRec = useCallback(() => {
     const rec = recognitionRef.current;
     if (!rec || !mountedRef.current || wakeStateRef.current === "off") return;
     try { rec.start(); } catch { /* already running */ }
   }, []);
 
-  const scheduleRestart = useCallback((delay = 200) => {
+  const scheduleRestart = useCallback((ms = 150) => {
     if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
-    restartTimerRef.current = setTimeout(startRecognition, delay);
-  }, [startRecognition]);
+    restartTimerRef.current = setTimeout(startRec, ms);
+  }, [startRec]);
 
-  // Exposed: force into activated state (used by clap detector)
+  /** Called by clap detector to skip the wake-word step */
   const forceActivate = useCallback(() => {
     if (wakeStateRef.current === "off") return;
-    setWakeStateSynced("activated");
+    setWS("activated");
     commandBufferRef.current = "";
     setLiveTranscript("");
-  }, [setWakeStateSynced]);
+  }, [setWS]);
 
   useEffect(() => {
     mountedRef.current = true;
-    const SpeechAPI = (window as Window).SpeechRecognition || (window as Window).webkitSpeechRecognition;
-    if (!SpeechAPI) { setSupported(false); return; }
+
+    if (!enabled) {
+      setWS("off");
+      return;
+    }
+
+    const SpeechAPI =
+      (window as Window).SpeechRecognition ||
+      (window as Window).webkitSpeechRecognition;
+
+    if (!SpeechAPI) {
+      setSupported(false);
+      setWS("off");
+      return;
+    }
 
     const rec = new SpeechAPI();
     rec.continuous = true;
     rec.interimResults = true;
-    rec.lang = "hi-IN"; // Indian English + Hindi — handles Hinglish
+    // en-IN = Indian English — correctly hears "JARVIS" + Hinglish commands
+    rec.lang = "en-IN";
     rec.maxAlternatives = 3;
     recognitionRef.current = rec;
 
@@ -70,27 +89,33 @@ export function useWakeWord({ onCommand, wakeWords = WAKE_WORDS }: UseWakeWordOp
       const fullText = (final || interim).trim();
 
       if (wakeStateRef.current === "standby") {
-        // Check all alternatives for wake word
         let detected = false;
         outer: for (let i = event.resultIndex; i < event.results.length; i++) {
           for (let j = 0; j < event.results[i].length; j++) {
-            const alt = event.results[i][j].transcript.toLowerCase().trim();
-            if (wakeWords.some(w => alt.includes(w))) { detected = true; break outer; }
+            const alt = event.results[i][j].transcript.toLowerCase();
+            if (wakeWords.some(w => alt.includes(w))) {
+              detected = true;
+              break outer;
+            }
           }
         }
         if (detected) {
-          setWakeStateSynced("activated");
+          setWS("activated");
           commandBufferRef.current = "";
           setLiveTranscript("");
-          // If command spoken after wake word in same breath
-          const afterWake = wakeWords.reduce((t, w) => t.replace(w, ""), fullText).trim();
+          const afterWake = wakeWords
+            .reduce((t, w) => t.replace(w, ""), fullText)
+            .trim();
           if (afterWake.length > 2) {
             commandBufferRef.current = afterWake;
             setLiveTranscript(afterWake);
           }
         }
-      } else if (wakeStateRef.current === "activated" || wakeStateRef.current === "listening") {
-        setWakeStateSynced("listening");
+      } else if (
+        wakeStateRef.current === "activated" ||
+        wakeStateRef.current === "listening"
+      ) {
+        setWS("listening");
         commandBufferRef.current = fullText;
         setLiveTranscript(fullText);
 
@@ -101,16 +126,21 @@ export function useWakeWord({ onCommand, wakeWords = WAKE_WORDS }: UseWakeWordOp
             if (cmd.length > 1) onCommand(cmd);
             commandBufferRef.current = "";
             setLiveTranscript("");
-            setWakeStateSynced("standby");
-          }, 800);
+            setWS("standby");
+          }, 900);
         }
       }
     };
 
     rec.onerror = (event: SpeechRecognitionErrorEvent) => {
       if (!mountedRef.current) return;
-      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
-        setSupported(false); setWakeStateSynced("off"); return;
+      if (
+        event.error === "not-allowed" ||
+        event.error === "service-not-allowed"
+      ) {
+        setSupported(false);
+        setWS("off");
+        return;
       }
       if (event.error === "aborted") return;
       scheduleRestart(800);
@@ -121,27 +151,17 @@ export function useWakeWord({ onCommand, wakeWords = WAKE_WORDS }: UseWakeWordOp
       if (wakeStateRef.current !== "off") scheduleRestart(100);
     };
 
-    startRecognition();
+    setWS("standby");
+    startRec();
 
     return () => {
       mountedRef.current = false;
       if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
       try { rec.abort(); } catch { /* ignore */ }
+      wakeStateRef.current = "off";
     };
-  }, []);
+  }, [enabled]);
 
-  const turnOff = useCallback(() => {
-    setWakeStateSynced("off");
-    if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
-    try { recognitionRef.current?.abort(); } catch { /* ignore */ }
-    setLiveTranscript("");
-  }, [setWakeStateSynced]);
-
-  const turnOn = useCallback(() => {
-    setWakeStateSynced("standby");
-    startRecognition();
-  }, [setWakeStateSynced, startRecognition]);
-
-  return { wakeState, liveTranscript, supported, turnOff, turnOn, forceActivate };
+  return { wakeState, liveTranscript, supported, forceActivate };
 }

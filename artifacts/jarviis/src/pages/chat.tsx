@@ -39,27 +39,59 @@ function useTime() {
 }
 
 export default function Chat() {
-  const [userName, setUserName] = useState("Guest");
+  const [userName, setUserName]       = useState("Guest");
   const [conversationId, setConversationId] = useState<number | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput] = useState("");
-  const [orbState, setOrbState] = useState<"idle" | "listening" | "thinking" | "speaking">("idle");
+  const [messages, setMessages]       = useState<Message[]>([]);
+  const [input, setInput]             = useState("");
+  const [orbState, setOrbState]       = useState<"idle"|"listening"|"thinking"|"speaking">("idle");
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  // ── Mic permission gate ────────────────────────────────────────
+  const [micEnabled, setMicEnabled]   = useState(false);
+  const [micStream,  setMicStream]    = useState<MediaStream | null>(null);
+  const [micError,   setMicError]     = useState<string | null>(null);
+  const [micLoading, setMicLoading]   = useState(false);
+
+  const messagesEndRef    = useRef<HTMLDivElement>(null);
   const conversationIdRef = useRef<number | null>(null);
-  const queryClient = useQueryClient();
-  const createConv = useCreateOpenaiConversation();
-  const { speak, stop } = useTTS();
-  const now = useTime();
+  const queryClient       = useQueryClient();
+  const createConv        = useCreateOpenaiConversation();
+  const { speak, stop }   = useTTS();
+  const now               = useTime();
 
   useEffect(() => { conversationIdRef.current = conversationId; }, [conversationId]);
 
-  // ── Send ───────────────────────────────────────────────────────
+  // ── Request mic permission (user gesture required) ─────────────
+  const enableMic = useCallback(async () => {
+    setMicLoading(true);
+    setMicError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
+      });
+      setMicStream(stream);
+      setMicEnabled(true);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("denied") || msg.includes("Permission")) {
+        setMicError("Microphone access denied. Please allow in browser settings.");
+      } else {
+        setMicError("Could not access microphone: " + msg);
+      }
+    } finally {
+      setMicLoading(false);
+    }
+  }, []);
+
+  // ── Send message ───────────────────────────────────────────────
   const sendMessage = useCallback(async (text: string) => {
     const convId = conversationIdRef.current;
     if (!text.trim() || !convId) return;
 
-    stop(); // stop any ongoing speech
+    stop();
     const userMsg = text.trim();
     setInput("");
 
@@ -99,7 +131,11 @@ export default function Chat() {
                 if (data.content) {
                   fullResponse += data.content;
                   setMessages(prev =>
-                    prev.map(m => m.id === asstMsgId ? { ...m, content: m.content + data.content } : m)
+                    prev.map(m =>
+                      m.id === asstMsgId
+                        ? { ...m, content: m.content + data.content }
+                        : m
+                    )
                   );
                 }
               } catch { /* partial */ }
@@ -108,10 +144,11 @@ export default function Chat() {
         }
       }
 
-      // Speak JARVIS response
       if (fullResponse.trim()) speak(fullResponse);
 
-      queryClient.invalidateQueries({ queryKey: getListOpenaiMessagesQueryKey(convId) });
+      queryClient.invalidateQueries({
+        queryKey: getListOpenaiMessagesQueryKey(convId),
+      });
     } catch (err) {
       console.error(err);
     } finally {
@@ -119,36 +156,51 @@ export default function Chat() {
     }
   }, [queryClient, speak, stop]);
 
-  // ── Wake word ──────────────────────────────────────────────────
+  // ── Wake word (only when mic enabled) ─────────────────────────
   const sendRef = useRef(sendMessage);
   useEffect(() => { sendRef.current = sendMessage; }, [sendMessage]);
 
-  const { wakeState, liveTranscript, supported, turnOff, turnOn, forceActivate } = useWakeWord({
+  const { wakeState, liveTranscript, supported, forceActivate } = useWakeWord({
+    enabled: micEnabled,
     onCommand: (t) => sendRef.current(t),
   });
 
+  // ── Clap detection (reuses same stream) ───────────────────────
+  const { clapState } = useClapDetect({
+    enabled: micEnabled,
+    stream: micStream,
+    onDoubleClap: forceActivate,
+  });
+
+  // Mirror wake state → orb
   useEffect(() => {
-    if (wakeState === "activated" || wakeState === "listening") setOrbState("listening");
+    if (wakeState === "activated" || wakeState === "listening") {
+      setOrbState("listening");
+    }
   }, [wakeState]);
 
+  // Show live transcript in input
   useEffect(() => {
     if (liveTranscript) setInput(liveTranscript);
   }, [liveTranscript]);
 
-  // ── Clap detection (double clap = activate JARVIS) ─────────────
-  const { clapState } = useClapDetect({ onDoubleClap: forceActivate });
-
-  // ── Init ───────────────────────────────────────────────────────
+  // ── Init conversation ──────────────────────────────────────────
   useEffect(() => {
-    const name = localStorage.getItem("jarvis_user_name") || localStorage.getItem("jarviis_user_name");
+    const name =
+      localStorage.getItem("jarvis_user_name") ||
+      localStorage.getItem("jarviis_user_name");
     if (name) setUserName(name);
 
     (async () => {
-      const stored = localStorage.getItem("jarvis_conversation_id") || localStorage.getItem("jarviis_conversation_id");
+      const stored =
+        localStorage.getItem("jarvis_conversation_id") ||
+        localStorage.getItem("jarviis_conversation_id");
       if (stored) {
         setConversationId(Number(stored));
       } else {
-        const conv = await createConv.mutateAsync({ data: { title: "JARVIS Session" } });
+        const conv = await createConv.mutateAsync({
+          data: { title: "JARVIS Session" },
+        });
         setConversationId(conv.id);
         localStorage.setItem("jarvis_conversation_id", String(conv.id));
       }
@@ -156,12 +208,21 @@ export default function Chat() {
   }, []);
 
   const { data: history } = useListOpenaiMessages(conversationId!, {
-    query: { enabled: !!conversationId, queryKey: getListOpenaiMessagesQueryKey(conversationId!) },
+    query: {
+      enabled: !!conversationId,
+      queryKey: getListOpenaiMessagesQueryKey(conversationId!),
+    },
   });
 
   useEffect(() => {
     if (history) {
-      setMessages(history.map(m => ({ id: String(m.id), role: m.role as "user" | "assistant", content: m.content })));
+      setMessages(
+        history.map(m => ({
+          id: String(m.id),
+          role: m.role as "user" | "assistant",
+          content: m.content,
+        }))
+      );
     }
   }, [history]);
 
@@ -169,26 +230,116 @@ export default function Chat() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const isListening = wakeState === "activated" || wakeState === "listening";
+  const isListening  = wakeState === "activated" || wakeState === "listening";
   const isProcessing = orbState === "thinking" || orbState === "speaking";
 
-  const timeStr = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  const dateStr = now.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }).toUpperCase();
+  const timeStr = now.toLocaleTimeString("en-IN", {
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  });
+  const dateStr = now
+    .toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })
+    .toUpperCase();
 
   return (
     <div className="h-screen w-full bg-[#020408] text-cyan-50 flex flex-col relative overflow-hidden font-mono select-none">
-      {/* Hex grid background */}
       <div className="hex-grid fixed inset-0 pointer-events-none z-0" />
       <ParticleBackground />
 
-      {/* Scan line sweep */}
+      {/* Scan line */}
       <motion.div
         className="fixed inset-x-0 h-px bg-gradient-to-r from-transparent via-cyan-400/30 to-transparent pointer-events-none z-[1]"
         animate={{ top: ["0%", "100%"] }}
         transition={{ duration: 8, repeat: Infinity, ease: "linear" }}
       />
 
-      {/* ── HUD Header ─────────────────────────────────────────── */}
+      {/* ── Mic activation gate overlay ─────────────────────────── */}
+      <AnimatePresence>
+        {!micEnabled && (
+          <motion.div
+            key="mic-gate"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-[#020408]/95 backdrop-blur-sm gap-8"
+          >
+            {/* Corner brackets on the gate */}
+            <HudCorner position="tl" size={24} className="top-6 left-6" />
+            <HudCorner position="tr" size={24} className="top-6 right-6" />
+            <HudCorner position="bl" size={24} className="bottom-6 left-6" />
+            <HudCorner position="br" size={24} className="bottom-6 right-6" />
+
+            <div className="flex flex-col items-center gap-3 text-center">
+              <motion.div
+                animate={{ opacity: [0.5, 1, 0.5] }}
+                transition={{ duration: 2, repeat: Infinity }}
+              >
+                <Orb size="lg" state="idle" />
+              </motion.div>
+              <div className="text-[9px] tracking-[0.5em] text-cyan-600 uppercase mt-4">
+                Stark A.I.
+              </div>
+              <h1 className="text-5xl font-light tracking-[0.6em] text-white hud-glow">
+                JARVIS
+              </h1>
+              <p className="text-[10px] tracking-[0.3em] text-cyan-600 uppercase mt-2">
+                Microphone access required for voice activation
+              </p>
+            </div>
+
+            <div className="flex flex-col items-center gap-4 w-full max-w-xs">
+              {micError && (
+                <motion.p
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  className="text-[10px] text-red-400 tracking-wider text-center px-4"
+                >
+                  {micError}
+                </motion.p>
+              )}
+
+              <div className="relative w-full">
+                <HudCorner position="tl" size={8} className="top-0 left-0" />
+                <HudCorner position="br" size={8} className="bottom-0 right-0" />
+                <Button
+                  onClick={enableMic}
+                  disabled={micLoading}
+                  className="w-full bg-cyan-950/60 hover:bg-cyan-900/80 text-cyan-100 border border-cyan-500/40 hover:border-cyan-400 rounded-none tracking-[0.3em] uppercase font-mono text-sm h-14 transition-all duration-300"
+                >
+                  {micLoading ? (
+                    <span className="flex items-center gap-2">
+                      <motion.span
+                        className="w-1.5 h-1.5 rounded-full bg-cyan-400"
+                        animate={{ opacity: [0, 1, 0] }}
+                        transition={{ duration: 1, repeat: Infinity }}
+                      />
+                      Requesting access…
+                    </span>
+                  ) : (
+                    <span className="flex items-center gap-3">
+                      <Mic size={16} />
+                      Activate JARVIS Voice
+                    </span>
+                  )}
+                </Button>
+              </div>
+
+              <Button
+                variant="ghost"
+                onClick={() => setMicEnabled(true)}
+                className="text-cyan-800 hover:text-cyan-600 hover:bg-transparent text-[10px] tracking-widest uppercase font-mono"
+              >
+                Skip — use text only
+              </Button>
+
+              <p className="text-[9px] tracking-wider text-cyan-900 text-center px-6">
+                Say "JARVIS" to activate · Double clap · or type below
+              </p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ── HUD Header ──────────────────────────────────────────── */}
       <div className="relative z-10 flex items-start justify-between px-6 pt-5 pb-3 border-b border-cyan-500/10">
 
         {/* Left panel */}
@@ -198,17 +349,29 @@ export default function Chat() {
           <div className="text-[9px] tracking-[0.2em] text-cyan-700">{dateStr}</div>
           <div className="mt-2 flex flex-col gap-0.5">
             <HudStat label="NEURAL CORE" value="ACTIVE" ok />
-            <HudStat label="MEMORY" value="SYNCED" ok />
-            <HudStat label="WAKE WORD" value={wakeState === "off" ? "OFF" : "ON"} ok={wakeState !== "off"} />
+            <HudStat label="MEMORY"      value="SYNCED" ok />
             <HudStat
-              label="CLAP DETECT"
-              value={clapState === "inactive" ? "OFF" : clapState === "clap1" ? "1×" : clapState === "activated" ? "2×!" : "READY"}
-              ok={clapState !== "inactive"}
+              label="VOICE"
+              value={
+                !micEnabled ? "DISABLED" :
+                wakeState === "off" ? "OFF" :
+                isListening ? "LISTENING" : "STANDBY"
+              }
+              ok={micEnabled && wakeState !== "off"}
+            />
+            <HudStat
+              label="CLAP"
+              value={
+                clapState === "inactive" ? "OFF" :
+                clapState === "clap1"    ? "1×…" :
+                clapState === "activated"? "2×!" : "READY"
+              }
+              ok={clapState === "ready" || clapState === "clap1" || clapState === "activated"}
             />
           </div>
         </div>
 
-        {/* Center orb + title */}
+        {/* Center orb */}
         <div className="flex flex-col items-center gap-3 flex-1">
           <div className="relative">
             <HudCorner position="tl" size={14} className="top-[-8px] left-[-8px]" />
@@ -221,8 +384,14 @@ export default function Chat() {
             <div className="text-[9px] tracking-[0.4em] text-cyan-600 uppercase">Stark A.I.</div>
             <h1 className="text-2xl font-light tracking-[0.5em] text-white hud-glow">JARVIS</h1>
             <div className="flex items-center gap-2 text-[9px] tracking-[0.3em] text-cyan-400 uppercase">
-              <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${orbState === "idle" ? "bg-cyan-400" : orbState === "listening" ? "bg-red-400" : orbState === "thinking" ? "bg-violet-400" : "bg-cyan-300"}`} />
-              {orbState === "idle" ? "STANDBY" : orbState === "listening" ? "LISTENING" : orbState === "thinking" ? "PROCESSING" : "RESPONDING"}
+              <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${
+                orbState === "idle"     ? "bg-cyan-400"   :
+                orbState === "listening"? "bg-red-400"    :
+                orbState === "thinking" ? "bg-violet-400" : "bg-cyan-300"
+              }`} />
+              {orbState === "idle"      ? "STANDBY"   :
+               orbState === "listening" ? "LISTENING"  :
+               orbState === "thinking"  ? "PROCESSING" : "RESPONDING"}
             </div>
           </div>
         </div>
@@ -232,22 +401,28 @@ export default function Chat() {
           <div className="text-[9px] tracking-[0.25em] text-cyan-600 uppercase">Neural Status</div>
           <div className="flex flex-col gap-0.5 items-end mt-1">
             <HudBar label="COGNITION" pct={94} />
-            <HudBar label="RESPONSE" pct={88} />
-            <HudBar label="ACCURACY" pct={97} />
+            <HudBar label="RESPONSE"  pct={88} />
+            <HudBar label="ACCURACY"  pct={97} />
           </div>
           <div className="mt-2 text-[9px] tracking-widest text-cyan-700">
             USER: <span className="text-cyan-400">{userName.toUpperCase()}</span>
           </div>
-          <button
-            onClick={wakeState === "off" ? turnOn : turnOff}
-            className="text-[9px] tracking-widest text-cyan-800 hover:text-cyan-500 transition-colors mt-1 uppercase"
-          >
-            {wakeState === "off" ? "Enable Wake Word" : "Disable Wake Word"}
-          </button>
+          {micEnabled && (
+            <button
+              onClick={() => {
+                micStream?.getTracks().forEach(t => t.stop());
+                setMicEnabled(false);
+                setMicStream(null);
+              }}
+              className="text-[9px] tracking-widest text-cyan-900 hover:text-cyan-600 transition-colors mt-1 uppercase"
+            >
+              Disable Voice
+            </button>
+          )}
         </div>
       </div>
 
-      {/* ── Empty state ─────────────────────────────────────────── */}
+      {/* ── Empty state ──────────────────────────────────────────── */}
       {messages.length === 0 && (
         <motion.div
           initial={{ opacity: 0 }}
@@ -263,18 +438,15 @@ export default function Chat() {
             {getGreeting()}, {userName}.
           </motion.p>
           <p className="text-[10px] tracking-[0.4em] text-cyan-600 uppercase">
-            {supported ? 'Say "JARVIS" or type a command' : "Type a command below"}
+            {micEnabled && supported
+              ? 'Say "JARVIS" · Double clap · or type'
+              : "Type a command below"}
           </p>
-          <div className="mt-6 flex gap-6 text-[9px] tracking-widest text-cyan-800 uppercase">
-            <span>■ Voice Active</span>
-            <span>■ Memory Online</span>
-            <span>■ AI Core Ready</span>
-          </div>
         </motion.div>
       )}
 
       {/* ── Messages ─────────────────────────────────────────────── */}
-      <div className="flex-1 overflow-y-auto px-6 md:px-16 lg:px-32 pb-36 z-10 no-scrollbar">
+      <div className="flex-1 overflow-y-auto px-6 md:px-16 lg:px-32 pb-40 z-10 no-scrollbar">
         <div className="max-w-3xl mx-auto flex flex-col gap-5 pt-5">
           {messages.map((m, idx) => (
             <motion.div
@@ -301,7 +473,7 @@ export default function Chat() {
                 )}
                 {m.content || (
                   <span className="flex gap-1 items-center">
-                    {[0, 1, 2].map(i => (
+                    {[0,1,2].map(i => (
                       <motion.span
                         key={i}
                         className="w-1.5 h-1.5 rounded-full bg-cyan-400"
@@ -330,26 +502,38 @@ export default function Chat() {
         </div>
       </div>
 
-      {/* ── Bottom Input ─────────────────────────────────────────── */}
+      {/* ── Bottom bar ───────────────────────────────────────────── */}
       <div className="absolute bottom-0 inset-x-0 z-20 bg-gradient-to-t from-[#020408] via-[#020408]/95 to-transparent px-6 pb-5 pt-8">
         <div className="max-w-3xl mx-auto flex flex-col gap-2">
 
-          {/* Voice status */}
+          {/* Status line */}
           <AnimatePresence mode="wait">
-            {isListening && (
+            {isListening ? (
               <motion.div key="ls" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
                 className="flex items-center gap-2 text-[9px] tracking-widest text-red-400 uppercase px-1">
                 <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-ping" />
-                {wakeState === "activated" ? "Wake word detected — listening for command" : "Listening…"}
+                {wakeState === "activated" ? "Wake word detected — speak now" : "Listening for command…"}
               </motion.div>
-            )}
-            {!isListening && wakeState === "standby" && supported && (
+            ) : clapState === "clap1" ? (
+              <motion.div key="c1" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                className="flex items-center gap-2 text-[9px] tracking-widest text-yellow-400 uppercase px-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-yellow-400 animate-pulse" />
+                One clap detected — clap again to activate
+              </motion.div>
+            ) : micEnabled && supported ? (
               <motion.div key="sb" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
                 className="flex items-center gap-2 text-[9px] tracking-widest text-cyan-700 uppercase px-1">
                 <span className="w-1 h-1 rounded-full bg-cyan-700" />
-                Wake word active — say "JARVIS"
+                Say "JARVIS" or double clap to activate voice
               </motion.div>
-            )}
+            ) : !micEnabled ? (
+              <motion.div key="nmic" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                className="flex items-center gap-2 text-[9px] tracking-widest text-cyan-800 uppercase px-1">
+                <span className="w-1 h-1 rounded-full bg-cyan-900" />
+                Voice disabled — type below or&nbsp;
+                <button onClick={enableMic} className="text-cyan-600 hover:text-cyan-400 underline">enable</button>
+              </motion.div>
+            ) : null}
           </AnimatePresence>
 
           {/* Input bar */}
@@ -357,7 +541,9 @@ export default function Chat() {
             <HudCorner position="tl" size={10} className="top-0 left-0" />
             <HudCorner position="br" size={10} className="bottom-0 right-0" />
 
-            <div className={`flex-shrink-0 transition-colors duration-300 ${isListening ? "text-red-400" : "text-cyan-600"}`}>
+            <div className={`flex-shrink-0 transition-colors duration-300 ${
+              isListening ? "text-red-400" : micEnabled ? "text-cyan-500" : "text-cyan-900"
+            }`}>
               {isListening ? <MicOff size={18} /> : <Mic size={18} />}
             </div>
 
@@ -365,7 +551,11 @@ export default function Chat() {
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={e => e.key === "Enter" && !e.shiftKey && sendMessage(input)}
-              placeholder={isListening ? "Listening…" : supported ? 'Say "JARVIS" or type a command…' : "Type a command…"}
+              placeholder={
+                isListening ? "Listening…" :
+                micEnabled && supported ? 'Say "JARVIS" · double clap · or type…' :
+                "Type a command…"
+              }
               className="flex-1 bg-transparent border-none focus-visible:ring-0 text-cyan-100 placeholder:text-cyan-900 font-sans text-sm"
             />
 
