@@ -27,11 +27,15 @@ export function Orb({ state = "idle", className, size = "md" }: OrbProps) {
     >
       {/* Outermost slow ring */}
       <motion.div
-        className="absolute rounded-full border"
+        className="absolute rounded-full"
         style={{
           inset: -16,
-          borderColor: colors.ring,
           borderWidth: 1,
+          borderStyle: "solid",
+          borderTopColor: colors.ring,
+          borderRightColor: colors.ring,
+          borderBottomColor: colors.ring,
+          borderLeftColor: colors.ring,
           opacity: 0.4,
         }}
         animate={{ rotate: 360 }}

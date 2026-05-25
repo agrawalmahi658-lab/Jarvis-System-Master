@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Mic, MicOff, Send } from "lucide-react";
 import { useWakeWord } from "@/hooks/use-wake-word";
+import { useClapDetect } from "@/hooks/use-clap-detect";
 import { useTTS } from "@/hooks/use-tts";
 import {
   useCreateOpenaiConversation,
@@ -122,7 +123,7 @@ export default function Chat() {
   const sendRef = useRef(sendMessage);
   useEffect(() => { sendRef.current = sendMessage; }, [sendMessage]);
 
-  const { wakeState, liveTranscript, supported, turnOff, turnOn } = useWakeWord({
+  const { wakeState, liveTranscript, supported, turnOff, turnOn, forceActivate } = useWakeWord({
     onCommand: (t) => sendRef.current(t),
   });
 
@@ -133,6 +134,9 @@ export default function Chat() {
   useEffect(() => {
     if (liveTranscript) setInput(liveTranscript);
   }, [liveTranscript]);
+
+  // ── Clap detection (double clap = activate JARVIS) ─────────────
+  const { clapState } = useClapDetect({ onDoubleClap: forceActivate });
 
   // ── Init ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -196,6 +200,11 @@ export default function Chat() {
             <HudStat label="NEURAL CORE" value="ACTIVE" ok />
             <HudStat label="MEMORY" value="SYNCED" ok />
             <HudStat label="WAKE WORD" value={wakeState === "off" ? "OFF" : "ON"} ok={wakeState !== "off"} />
+            <HudStat
+              label="CLAP DETECT"
+              value={clapState === "inactive" ? "OFF" : clapState === "clap1" ? "1×" : clapState === "activated" ? "2×!" : "READY"}
+              ok={clapState !== "inactive"}
+            />
           </div>
         </div>
 
