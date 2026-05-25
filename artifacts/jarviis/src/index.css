@@ -216,6 +216,8 @@
 }
 .text-cyan { color: #00D4FF; }
 .glow-cyan { text-shadow: 0 0 20px rgba(0, 212, 255, 0.8); }
+.hud-glow  { text-shadow: 0 0 30px rgba(0, 212, 255, 0.9), 0 0 60px rgba(0, 212, 255, 0.4); }
+
 @keyframes breathe {
   0%, 100% { transform: scale(1); opacity: 0.9; }
   50% { transform: scale(1.08); opacity: 1; }
@@ -226,3 +228,35 @@
   100% { transform: translateY(-80px) translateX(20px); opacity: 0; }
 }
 .animate-breathe { animation: breathe 4s ease-in-out infinite; }
+
+/* ── Hex grid background ── */
+.hex-grid {
+  background-color: transparent;
+  background-image:
+    radial-gradient(circle, rgba(0, 212, 255, 0.06) 1px, transparent 1px);
+  background-size: 32px 32px;
+  opacity: 0.6;
+}
+
+/* ── HUD chat bubbles ── */
+.hud-bubble-user {
+  background: rgba(0, 212, 255, 0.06);
+  border: 1px solid rgba(0, 212, 255, 0.18);
+  backdrop-filter: blur(8px);
+}
+.hud-bubble-asst {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(0, 212, 255, 0.08);
+  backdrop-filter: blur(8px);
+}
+
+/* ── HUD input bar ── */
+.hud-input-bar {
+  background: rgba(0, 10, 20, 0.7);
+  border: 1px solid rgba(0, 212, 255, 0.2);
+  backdrop-filter: blur(20px);
+}
+
+/* ── Scrollbar hide ── */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
