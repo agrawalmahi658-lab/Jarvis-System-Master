@@ -5,6 +5,7 @@ import { ParticleBackground } from "@/components/particle-background";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Mic, MicOff, Send } from "lucide-react";
+import { useWakeWord } from "@/hooks/use-wake-word";
 import {
   useCreateOpenaiConversation,
   useListOpenaiMessages,
@@ -16,14 +17,6 @@ interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
-}
-
-// Augment window for webkit SpeechRecognition
-declare global {
-  interface Window {
-    SpeechRecognition: typeof SpeechRecognition;
-    webkitSpeechRecognition: typeof SpeechRecognition;
-  }
 }
 
 function getGreeting() {
@@ -41,25 +34,125 @@ export default function Chat() {
   const [orbState, setOrbState] = useState<
     "idle" | "listening" | "thinking" | "speaking"
   >("idle");
-  const [isListening, setIsListening] = useState(false);
-  const [voiceError, setVoiceError] = useState<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const recognitionRef = useRef<SpeechRecognition | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  const createConv = useCreateOpenaiConversation();
+  const conversationIdRef = useRef<number | null>(null);
   const queryClient = useQueryClient();
+  const createConv = useCreateOpenaiConversation();
 
-  // Init conversation
+  // Keep ref in sync so wake word callback always sees latest id
+  useEffect(() => {
+    conversationIdRef.current = conversationId;
+  }, [conversationId]);
+
+  // ── Send message ──────────────────────────────────────────────
+  const sendMessage = useCallback(
+    async (text: string) => {
+      const convId = conversationIdRef.current;
+      if (!text.trim() || !convId) return;
+
+      const userMsg = text.trim();
+      setInput("");
+
+      const newMsgId = Date.now().toString();
+      setMessages((prev) => [
+        ...prev,
+        { id: newMsgId, role: "user", content: userMsg },
+      ]);
+      setOrbState("thinking");
+
+      const assistantMsgId = (Date.now() + 1).toString();
+      setMessages((prev) => [
+        ...prev,
+        { id: assistantMsgId, role: "assistant", content: "" },
+      ]);
+
+      try {
+        const BASE = import.meta.env.BASE_URL;
+        const response = await fetch(
+          `${BASE}api/openai/conversations/${convId}/messages`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ content: userMsg }),
+          }
+        );
+
+        if (!response.body) throw new Error("No response body");
+        setOrbState("speaking");
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let done = false;
+
+        while (!done) {
+          const { value, done: readerDone } = await reader.read();
+          done = readerDone;
+          if (value) {
+            const chunk = decoder.decode(value, { stream: true });
+            for (const line of chunk.split("\n")) {
+              if (line.startsWith("data: ")) {
+                try {
+                  const data = JSON.parse(line.slice(6));
+                  if (data.content) {
+                    setMessages((prev) =>
+                      prev.map((m) =>
+                        m.id === assistantMsgId
+                          ? { ...m, content: m.content + data.content }
+                          : m
+                      )
+                    );
+                  }
+                } catch {
+                  /* partial chunk */
+                }
+              }
+            }
+          }
+        }
+
+        queryClient.invalidateQueries({
+          queryKey: getListOpenaiMessagesQueryKey(convId),
+        });
+      } catch (err) {
+        console.error("send failed", err);
+      } finally {
+        setOrbState("idle");
+      }
+    },
+    [queryClient]
+  );
+
+  // ── Wake word hook ────────────────────────────────────────────
+  const { wakeState, liveTranscript, supported, turnOff, turnOn } =
+    useWakeWord({
+      onCommand: sendMessage,
+    });
+
+  // Mirror wake state → orb state
+  useEffect(() => {
+    if (wakeState === "activated" || wakeState === "listening") {
+      setOrbState("listening");
+    } else if (orbState === "listening") {
+      // only reset if nothing else is in progress
+      setOrbState("idle");
+    }
+  }, [wakeState]);
+
+  // Fill input box with live voice transcript
+  useEffect(() => {
+    if (liveTranscript) setInput(liveTranscript);
+  }, [liveTranscript]);
+
+  // ── Init conversation ─────────────────────────────────────────
   useEffect(() => {
     const name = localStorage.getItem("jarviis_user_name");
     if (name) setUserName(name);
 
-    const initConversation = async () => {
-      const storedId = localStorage.getItem("jarviis_conversation_id");
-      if (storedId) {
-        setConversationId(Number(storedId));
+    const init = async () => {
+      const stored = localStorage.getItem("jarviis_conversation_id");
+      if (stored) {
+        setConversationId(Number(stored));
       } else {
         const conv = await createConv.mutateAsync({
           data: { title: "JARVIIS Session" },
@@ -68,87 +161,10 @@ export default function Chat() {
         localStorage.setItem("jarviis_conversation_id", String(conv.id));
       }
     };
-    initConversation();
+    init();
   }, []);
 
-  // Setup speech recognition
-  useEffect(() => {
-    const SpeechRecognitionAPI =
-      window.SpeechRecognition || window.webkitSpeechRecognition;
-
-    if (!SpeechRecognitionAPI) {
-      setVoiceError("Voice not supported in this browser");
-      return;
-    }
-
-    const recognition = new SpeechRecognitionAPI();
-    recognition.continuous = false;
-    recognition.interimResults = true;
-    recognition.lang = "en-IN"; // Indian English — works well for Hinglish too
-
-    recognition.onstart = () => {
-      setIsListening(true);
-      setOrbState("listening");
-      setVoiceError(null);
-    };
-
-    recognition.onresult = (event) => {
-      let transcript = "";
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        transcript += event.results[i][0].transcript;
-      }
-      setInput(transcript);
-    };
-
-    recognition.onerror = (event) => {
-      if (event.error === "not-allowed") {
-        setVoiceError("Microphone access denied");
-      } else if (event.error === "no-speech") {
-        setVoiceError("No speech detected — try again");
-      } else {
-        setVoiceError("Voice error: " + event.error);
-      }
-      setIsListening(false);
-      setOrbState("idle");
-    };
-
-    recognition.onend = () => {
-      setIsListening(false);
-      setOrbState((prev) => (prev === "listening" ? "idle" : prev));
-      // Auto-send if we captured something
-      setInput((current) => {
-        if (current.trim()) {
-          // slight delay so state updates settle
-          setTimeout(() => handleSendRef.current?.(), 50);
-        }
-        return current;
-      });
-    };
-
-    recognitionRef.current = recognition;
-
-    return () => {
-      recognition.abort();
-    };
-  }, []);
-
-  const handleToggleVoice = () => {
-    const rec = recognitionRef.current;
-    if (!rec) return;
-
-    if (isListening) {
-      rec.stop();
-    } else {
-      setInput("");
-      try {
-        rec.start();
-      } catch {
-        // already started
-      }
-    }
-  };
-
-  // Load history
+  // ── Load history ──────────────────────────────────────────────
   const { data: history } = useListOpenaiMessages(conversationId!, {
     query: {
       enabled: !!conversationId,
@@ -172,95 +188,17 @@ export default function Chat() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Keep a ref to handleSend so the recognition onend closure can call it
-  const handleSendRef = useRef<(() => void) | null>(null);
+  const handleSend = () => sendMessage(input);
 
-  const handleSend = useCallback(async () => {
-    if (!input.trim() || !conversationId) return;
-
-    const userMsg = input.trim();
-    setInput("");
-    setVoiceError(null);
-
-    const newMsgId = Date.now().toString();
-    setMessages((prev) => [
-      ...prev,
-      { id: newMsgId, role: "user", content: userMsg },
-    ]);
-    setOrbState("thinking");
-
-    const assistantMsgId = (Date.now() + 1).toString();
-    setMessages((prev) => [
-      ...prev,
-      { id: assistantMsgId, role: "assistant", content: "" },
-    ]);
-
-    try {
-      const BASE = import.meta.env.BASE_URL;
-      const response = await fetch(
-        `${BASE}api/openai/conversations/${conversationId}/messages`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ content: userMsg }),
-        }
-      );
-
-      if (!response.body) throw new Error("No response body");
-      setOrbState("speaking");
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let done = false;
-
-      while (!done) {
-        const { value, done: readerDone } = await reader.read();
-        done = readerDone;
-        if (value) {
-          const chunk = decoder.decode(value, { stream: true });
-          const lines = chunk.split("\n");
-          for (const line of lines) {
-            if (line.startsWith("data: ")) {
-              try {
-                const data = JSON.parse(line.slice(6));
-                if (data.content) {
-                  setMessages((prev) =>
-                    prev.map((m) =>
-                      m.id === assistantMsgId
-                        ? { ...m, content: m.content + data.content }
-                        : m
-                    )
-                  );
-                }
-              } catch {
-                // partial chunk, ignore
-              }
-            }
-          }
-        }
-      }
-
-      queryClient.invalidateQueries({
-        queryKey: getListOpenaiMessagesQueryKey(conversationId),
-      });
-    } catch (error) {
-      console.error("Failed to send message", error);
-    } finally {
-      setOrbState("idle");
-    }
-  }, [input, conversationId, queryClient]);
-
-  // Keep ref in sync
-  useEffect(() => {
-    handleSendRef.current = handleSend;
-  }, [handleSend]);
+  const isListening = wakeState === "activated" || wakeState === "listening";
+  const isProcessing = orbState === "thinking" || orbState === "speaking";
 
   return (
     <div className="h-screen w-full bg-[#030508] text-cyan-50 flex flex-col relative overflow-hidden font-sans">
       <ParticleBackground />
 
-      {/* Top Header */}
-      <div className="pt-8 pb-4 px-6 flex flex-col items-center justify-center z-10">
+      {/* Header */}
+      <div className="pt-8 pb-4 px-6 flex flex-col items-center z-10">
         <Orb state={orbState} size="sm" />
         <div className="mt-4 flex flex-col items-center">
           <h1 className="text-xl font-light tracking-[0.3em] text-white glow-cyan">
@@ -273,7 +211,7 @@ export default function Chat() {
         </div>
       </div>
 
-      {/* Greeting when no messages */}
+      {/* Empty state greeting */}
       {messages.length === 0 && (
         <motion.div
           initial={{ opacity: 0 }}
@@ -286,14 +224,18 @@ export default function Chat() {
           <p className="text-cyan-600/60 mt-2 tracking-widest text-sm uppercase">
             How can I assist you today?
           </p>
-          <p className="text-cyan-700/40 mt-4 text-xs tracking-wider">
-            Tap the mic or type a message
-          </p>
+          <motion.p
+            animate={{ opacity: [0.3, 0.8, 0.3] }}
+            transition={{ duration: 3, repeat: Infinity }}
+            className="text-cyan-700/50 mt-4 text-xs tracking-widest font-mono"
+          >
+            {supported ? 'Say "JARVIS" to begin' : "Type a message below"}
+          </motion.p>
         </motion.div>
       )}
 
-      {/* Chat Area */}
-      <div className="flex-1 overflow-y-auto px-4 md:px-20 lg:px-40 pb-36 z-10 no-scrollbar">
+      {/* Chat messages */}
+      <div className="flex-1 overflow-y-auto px-4 md:px-20 lg:px-40 pb-40 z-10 no-scrollbar">
         <div className="max-w-3xl mx-auto flex flex-col gap-6 pt-4">
           {messages.map((m) => (
             <motion.div
@@ -323,7 +265,6 @@ export default function Chat() {
                     thinking…
                   </span>
                 )}
-
                 {m.role === "assistant" &&
                   orbState === "speaking" &&
                   m.id === messages[messages.length - 1].id && (
@@ -349,70 +290,102 @@ export default function Chat() {
         </div>
       </div>
 
-      {/* Bottom Input */}
+      {/* Bottom input bar */}
       <div className="absolute bottom-0 inset-x-0 p-6 bg-gradient-to-t from-[#030508] via-[#030508]/90 to-transparent z-20">
         <div className="max-w-3xl mx-auto flex flex-col gap-2">
 
-          {/* Voice status / errors */}
-          <AnimatePresence>
-            {(isListening || voiceError) && (
-              <motion.div
-                initial={{ opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0 }}
-                className="flex items-center gap-2 px-2 text-[10px] font-mono tracking-widest"
-              >
-                {isListening ? (
-                  <>
-                    <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-ping" />
-                    <span className="text-red-400 uppercase">
-                      Listening… speak now
-                    </span>
-                  </>
-                ) : voiceError ? (
-                  <>
-                    <span className="w-1.5 h-1.5 rounded-full bg-yellow-500" />
-                    <span className="text-yellow-500">{voiceError}</span>
-                  </>
-                ) : null}
-              </motion.div>
-            )}
-          </AnimatePresence>
+          {/* Status bar */}
+          <div className="flex items-center justify-between px-2 min-h-[18px]">
+            <AnimatePresence mode="wait">
+              {isListening ? (
+                <motion.div
+                  key="listening"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="flex items-center gap-2 text-[10px] font-mono tracking-widest"
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-ping" />
+                  <span className="text-red-400 uppercase">
+                    {wakeState === "activated" ? "Wake word detected — listening…" : "Listening for command…"}
+                  </span>
+                </motion.div>
+              ) : wakeState === "standby" && supported ? (
+                <motion.div
+                  key="standby"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="flex items-center gap-2 text-[10px] font-mono tracking-widest text-cyan-600/50"
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-600/50" />
+                  WAKE WORD: ON — say "JARVIS"
+                </motion.div>
+              ) : wakeState === "off" ? (
+                <motion.div
+                  key="off"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="flex items-center gap-2 text-[10px] font-mono tracking-widest text-cyan-900"
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-900" />
+                  WAKE WORD: OFF
+                </motion.div>
+              ) : null}
+            </AnimatePresence>
 
+            {/* Toggle wake word on/off */}
+            {supported && (
+              <button
+                onClick={wakeState === "off" ? turnOn : turnOff}
+                className="text-[10px] font-mono tracking-widest text-cyan-700 hover:text-cyan-400 transition-colors ml-auto"
+              >
+                {wakeState === "off" ? "ENABLE WAKE WORD" : "DISABLE"}
+              </button>
+            )}
+          </div>
+
+          {/* Input row */}
           <div className="glass rounded-full flex items-center p-2 pl-5 gap-2">
-            {/* Mic button */}
-            <button
-              onClick={handleToggleVoice}
+            {/* Mic indicator — visual only, wake word is always-on */}
+            <div
               className={`flex-shrink-0 transition-all duration-300 ${
                 isListening
                   ? "text-red-400 scale-110"
-                  : "text-cyan-500 hover:text-cyan-300"
+                  : supported
+                  ? "text-cyan-600"
+                  : "text-cyan-900"
               }`}
-              title={isListening ? "Stop listening" : "Start voice input"}
             >
               {isListening ? <MicOff size={20} /> : <Mic size={20} />}
-            </button>
+            </div>
 
             <Input
-              ref={inputRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
+              onKeyDown={(e) =>
+                e.key === "Enter" && !e.shiftKey && handleSend()
+              }
               placeholder={
-                isListening ? "Listening…" : "Type or use the mic…"
+                isListening
+                  ? "Listening…"
+                  : supported
+                  ? 'Say "JARVIS" or type here…'
+                  : "Type a message…"
               }
               className="flex-1 bg-transparent border-none focus-visible:ring-0 text-cyan-50 placeholder:text-cyan-800"
             />
 
             <Button
               onClick={handleSend}
-              disabled={!input.trim() || orbState === "thinking" || orbState === "speaking"}
+              disabled={!input.trim() || isProcessing}
               size="icon"
               className="rounded-full bg-cyan-900/50 hover:bg-cyan-800/80 text-cyan-300 border border-cyan-500/30 flex-shrink-0"
             >
               <Send
                 size={18}
-                className={input.trim() ? "glow-cyan" : "opacity-40"}
+                className={input.trim() && !isProcessing ? "glow-cyan" : "opacity-40"}
               />
             </Button>
           </div>
