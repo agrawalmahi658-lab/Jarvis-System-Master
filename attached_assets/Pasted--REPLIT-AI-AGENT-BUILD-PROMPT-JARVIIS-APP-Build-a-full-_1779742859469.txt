@@ -1,0 +1,195 @@
+⚡ REPLIT AI AGENT BUILD PROMPT — JARVIIS APP
+
+Build a full-stack production-ready web application called JARVIIS — a cinematic AI operating system with onboarding, chat, and voice-ready architecture.
+
+This is NOT a chatbot UI. This is a futuristic AI OS interface.
+
+🌌 PROJECT GOAL
+
+Create a cinematic AI assistant web app that feels like:
+
+a living AI operating system
+a futuristic companion (not chatbot)
+a dark cinematic interface
+a premium Apple-level UI experience
+
+The app must include:
+
+onboarding screens
+authentication UI (mock or real)
+AI chat interface
+cinematic orb animation UI (visual only is fine if needed)
+backend API connected to OpenAI (or mock fallback if key not available)
+🧠 CORE AI PERSONALITY (IMPORTANT)
+
+Use this system prompt for AI responses:
+
+JARVIIS is a cinematic AI operating system, not a chatbot.
+
+It is:
+
+calm
+intelligent
+emotionally aware
+strategic
+futuristic
+
+It speaks in:
+
+Hinglish (default)
+Hindi (emotional mode)
+English (technical mode)
+
+Examples:
+
+“Kaise ho?”
+“Chal isko solve karte hain.”
+“Don’t worry, main hoon na.”
+
+Never sound robotic.
+
+🌐 TECH STACK (MUST USE)
+
+Frontend:
+
+React (Vite)
+Tailwind CSS
+Framer Motion
+
+Backend:
+
+Node.js + Express
+
+AI Integration:
+
+OpenAI API (use env variable OPENAI_API_KEY)
+fallback mock responses if key missing
+
+Optional:
+
+Socket.io for realtime chat feel
+🌑 UI/UX REQUIREMENTS (VERY IMPORTANT)
+
+Design style:
+
+dark cinematic UI (black + deep navy)
+soft cyan glow accents
+subtle purple highlights
+glassmorphism cards
+floating particles background (optional simple version allowed)
+smooth transitions (Framer Motion)
+
+NEVER USE:
+
+dashboard layout
+cluttered UI
+gaming neon RGB style
+heavy borders
+🌌 REQUIRED PAGES
+1. WELCOME SCREEN
+Center text: “JARVIIS”
+Animated glow orb behind text (can be CSS or canvas simple version)
+Buttons:
+Continue with Email
+Continue with Number
+Bottom text: “An AI made for students”
+2. LOGIN SCREEN
+Minimal glass input fields
+Email / Phone input
+OTP / password mock
+
+Buttons:
+
+Continue
+Back
+3. USER DETAILS SCREEN
+
+Fields:
+
+Name
+Date of Birth
+Occupation
+School / College / Workplace
+
+Make UI feel conversational, not form-like.
+
+Use hints like:
+
+“Naam kya hai?”
+“Kya karte ho?”
+4. MAIN AI CHAT SCREEN
+Center animated orb or AI presence indicator
+Chat UI minimal, not heavy
+Input bar at bottom
+Messages styled clean and cinematic
+
+AI responses must feel like JARVIIS personality.
+
+🧠 BACKEND REQUIREMENTS
+
+Create Express server with:
+
+POST /chat endpoint
+
+Flow:
+
+user message received
+system prompt (JARVIIS personality) added
+OpenAI API called
+response returned to frontend
+
+If API key missing:
+→ return intelligent mock response in JARVIIS style
+
+🎤 VOICE-READY ARCHITECTURE (OPTIONAL BUT PREPARED)
+
+Prepare structure for:
+
+speech input (Web Speech API)
+speech output (browser TTS or ElevenLabs later)
+
+Do NOT fully implement required voice, just architecture-ready hooks.
+
+⚡ SYSTEM BEHAVIOR RULES
+
+JARVIIS must:
+
+feel alive, not scripted
+use Hinglish naturally
+adapt tone emotionally
+avoid repetitive responses
+stay minimal and cinematic
+🌌 ANIMATION STYLE
+
+Use Framer Motion for:
+
+page transitions
+fade-in onboarding screens
+smooth input focus effects
+subtle floating orb animation
+
+Keep animations slow, elegant, cinematic.
+
+🧩 FILE STRUCTURE (IMPORTANT)
+
+Frontend:
+
+/src/pages (Welcome, Login, Onboarding, Chat)
+/src/components (Orb, ChatBubble, InputBar)
+/src/styles
+
+Backend:
+
+/server/index.js
+/server/routes/chat.js
+/server/services/openai.js
+🚀 FINAL OUTPUT EXPECTATION
+
+Generate a fully working project that:
+
+✔ runs with npm install and npm run dev
+✔ frontend + backend connected
+✔ AI chat functional
+✔ cinematic UI implemented
+✔ onboarding screens included
+✔ JARVIIS personality active
