@@ -319,10 +319,9 @@ export default function Chat() {
             <HudCorner position="tr" size={14} className="top-[-8px] right-[-8px]" />
             <HudCorner position="bl" size={14} className="bottom-[-8px] left-[-8px]" />
             <HudCorner position="br" size={14} className="bottom-[-8px] right-[-8px]" />
-            <Orb state={orbState} size="md" />
+            <Orb state={orbState} size="lg" />
           </div>
           <div className="flex flex-col items-center gap-0.5">
-            <div className="text-[9px] tracking-[0.4em] text-cyan-600 uppercase">Stark A.I.</div>
             <h1 className="text-2xl font-light tracking-[0.5em] text-white hud-glow">JARVIS</h1>
             <div className="flex items-center gap-2 text-[9px] tracking-[0.3em] text-cyan-400 uppercase">
               <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${
