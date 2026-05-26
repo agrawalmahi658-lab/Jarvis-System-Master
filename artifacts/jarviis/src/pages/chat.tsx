@@ -323,12 +323,17 @@ export default function Chat() {
 
         {/* Center orb + title */}
         <div className="flex flex-col items-center gap-2 flex-1">
-          <div className="relative">
+          <div
+            className="relative cursor-pointer group"
+            onClick={forceActivate}
+            title="Tap to activate voice"
+          >
             <HudCorner position="tl" size={14} className="top-[-8px] left-[-8px]" />
             <HudCorner position="tr" size={14} className="top-[-8px] right-[-8px]" />
             <HudCorner position="bl" size={14} className="bottom-[-8px] left-[-8px]" />
             <HudCorner position="br" size={14} className="bottom-[-8px] right-[-8px]" />
             <Orb state={orbState} size="lg" />
+            <div className="absolute inset-0 rounded-full bg-cyan-400/5 group-hover:bg-cyan-400/10 transition-colors duration-200 pointer-events-none" />
           </div>
           <div className="flex flex-col items-center gap-0.5">
             <h1 className="text-2xl font-light tracking-[0.5em] text-white hud-glow">JARVIS</h1>
@@ -342,6 +347,17 @@ export default function Chat() {
                orbState === "listening" ? "LISTENING"  :
                orbState === "thinking"  ? "PROCESSING" : "RESPONDING"}
             </div>
+            {/* Tap to speak hint — always visible as a tap target */}
+            <button
+              onClick={forceActivate}
+              className={`mt-1 text-[8px] tracking-[0.35em] uppercase px-3 py-1 border transition-all duration-300 ${
+                isListening
+                  ? "border-red-500/60 text-red-400 animate-pulse"
+                  : "border-cyan-800/40 text-cyan-800 hover:border-cyan-500/60 hover:text-cyan-500"
+              }`}
+            >
+              {isListening ? "● LISTENING…" : "⊙ TAP TO SPEAK"}
+            </button>
           </div>
 
           {/* Smart Mode quick-launch */}
@@ -496,11 +512,19 @@ export default function Chat() {
             <HudCorner position="tl" size={10} className="top-0 left-0" />
             <HudCorner position="br" size={10} className="bottom-0 right-0" />
 
-            <div className={`flex-shrink-0 transition-colors duration-300 ${
-              isListening ? "text-red-400" : wakeState !== "off" && wakeState !== "denied" ? "text-cyan-500" : "text-cyan-900"
-            }`}>
+            <button
+              onClick={forceActivate}
+              className={`flex-shrink-0 transition-colors duration-300 p-1 rounded ${
+                isListening
+                  ? "text-red-400"
+                  : wakeState !== "off" && wakeState !== "denied"
+                    ? "text-cyan-500 hover:text-cyan-300"
+                    : "text-cyan-700 hover:text-cyan-500"
+              }`}
+              title="Tap to activate voice"
+            >
               {isListening ? <MicOff size={18} /> : <Mic size={18} />}
-            </div>
+            </button>
 
             <Input
               value={input}

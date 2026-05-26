@@ -39,11 +39,20 @@ export function useWakeWord({ onCommand, wakeWords = WAKE_WORDS }: UseWakeWordOp
   }, [startRec]);
 
   const forceActivate = useCallback(() => {
-    if (wakeStateRef.current === "off" || wakeStateRef.current === "denied") return;
+    // If denied — try restarting recognition to re-trigger browser permission prompt
+    if (wakeStateRef.current === "denied") {
+      setWS("standby");
+      setTimeout(startRec, 100);
+      return;
+    }
+    if (wakeStateRef.current === "off") return;
     setWS("activated");
     commandBufferRef.current = "";
     setLiveTranscript("");
-  }, [setWS]);
+    // Restart recognition in case it stalled
+    try { recognitionRef.current?.abort(); } catch { /* ignore */ }
+    setTimeout(startRec, 100);
+  }, [setWS, startRec]);
 
   useEffect(() => {
     mountedRef.current = true;
