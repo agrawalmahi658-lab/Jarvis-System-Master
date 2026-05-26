@@ -45,7 +45,7 @@ export default function Chat() {
   const [input, setInput]             = useState("");
   const [orbState, setOrbState]       = useState<"idle"|"listening"|"thinking"|"speaking">("idle");
 
-  // ── Mic permission gate ────────────────────────────────────────
+  // ── Mic state ─────────────────────────────────────────────────
   const [micEnabled, setMicEnabled]   = useState(false);
   const [micStream,  setMicStream]    = useState<MediaStream | null>(null);
   const [micError,   setMicError]     = useState<string | null>(null);
@@ -60,7 +60,7 @@ export default function Chat() {
 
   useEffect(() => { conversationIdRef.current = conversationId; }, [conversationId]);
 
-  // ── Request mic permission (user gesture required) ─────────────
+  // ── Request mic permission ─────────────────────────────────────
   const enableMic = useCallback(async () => {
     setMicLoading(true);
     setMicError(null);
@@ -76,14 +76,19 @@ export default function Chat() {
       setMicEnabled(true);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("denied") || msg.includes("Permission")) {
-        setMicError("Microphone access denied. Please allow in browser settings.");
+      if (msg.includes("denied") || msg.includes("Permission") || msg.includes("NotAllowed")) {
+        setMicError("Microphone blocked — allow in browser settings, then refresh.");
       } else {
-        setMicError("Could not access microphone: " + msg);
+        setMicError("Mic unavailable: " + msg);
       }
     } finally {
       setMicLoading(false);
     }
+  }, []);
+
+  // ── Auto-request mic on first load (browser shows its own popup) ─
+  useEffect(() => {
+    enableMic();
   }, []);
 
   // ── Send message ───────────────────────────────────────────────
@@ -252,92 +257,28 @@ export default function Chat() {
         transition={{ duration: 8, repeat: Infinity, ease: "linear" }}
       />
 
-      {/* ── Mic activation gate overlay ─────────────────────────── */}
+      {/* ── Mic error banner (only if denied/blocked) ───────────── */}
       <AnimatePresence>
-        {!micEnabled && (
+        {micError && (
           <motion.div
-            key="mic-gate"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-[#020408]/95 backdrop-blur-sm gap-8"
+            key="mic-err"
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            className="fixed top-0 inset-x-0 z-50 flex items-center justify-between gap-3 px-5 py-2 bg-red-950/90 border-b border-red-500/30 text-[10px] tracking-widest text-red-300 uppercase"
           >
-            {/* Corner brackets on the gate */}
-            <HudCorner position="tl" size={24} className="top-6 left-6" />
-            <HudCorner position="tr" size={24} className="top-6 right-6" />
-            <HudCorner position="bl" size={24} className="bottom-6 left-6" />
-            <HudCorner position="br" size={24} className="bottom-6 right-6" />
-
-            <div className="flex flex-col items-center gap-3 text-center">
-              <motion.div
-                animate={{ opacity: [0.5, 1, 0.5] }}
-                transition={{ duration: 2, repeat: Infinity }}
-              >
-                <Orb size="lg" state="idle" />
-              </motion.div>
-              <div className="text-[9px] tracking-[0.5em] text-cyan-600 uppercase mt-4">
-                Stark A.I.
-              </div>
-              <h1 className="text-5xl font-light tracking-[0.6em] text-white hud-glow">
-                JARVIS
-              </h1>
-              <p className="text-[10px] tracking-[0.3em] text-cyan-600 uppercase mt-2">
-                Microphone access required for voice activation
-              </p>
-            </div>
-
-            <div className="flex flex-col items-center gap-4 w-full max-w-xs">
-              {micError && (
-                <motion.p
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  className="text-[10px] text-red-400 tracking-wider text-center px-4"
-                >
-                  {micError}
-                </motion.p>
-              )}
-
-              <div className="relative w-full">
-                <HudCorner position="tl" size={8} className="top-0 left-0" />
-                <HudCorner position="br" size={8} className="bottom-0 right-0" />
-                <Button
-                  onClick={enableMic}
-                  disabled={micLoading}
-                  className="w-full bg-cyan-950/60 hover:bg-cyan-900/80 text-cyan-100 border border-cyan-500/40 hover:border-cyan-400 rounded-none tracking-[0.3em] uppercase font-mono text-sm h-14 transition-all duration-300"
-                >
-                  {micLoading ? (
-                    <span className="flex items-center gap-2">
-                      <motion.span
-                        className="w-1.5 h-1.5 rounded-full bg-cyan-400"
-                        animate={{ opacity: [0, 1, 0] }}
-                        transition={{ duration: 1, repeat: Infinity }}
-                      />
-                      Requesting access…
-                    </span>
-                  ) : (
-                    <span className="flex items-center gap-3">
-                      <Mic size={16} />
-                      Activate JARVIS Voice
-                    </span>
-                  )}
-                </Button>
-              </div>
-
-              <Button
-                variant="ghost"
-                onClick={() => setMicEnabled(true)}
-                className="text-cyan-800 hover:text-cyan-600 hover:bg-transparent text-[10px] tracking-widest uppercase font-mono"
-              >
-                Skip — use text only
-              </Button>
-
-              <p className="text-[9px] tracking-wider text-cyan-900 text-center px-6">
-                Say "JARVIS" to activate · Double clap · or type below
-              </p>
-            </div>
+            <span className="flex items-center gap-2">
+              <MicOff size={12} />
+              {micError}
+            </span>
+            <button
+              onClick={enableMic}
+              className="text-red-200 hover:text-white border border-red-500/40 px-3 py-1 hover:border-red-300 transition-colors"
+            >
+              Retry
+            </button>
           </motion.div>
-        )}
-      </AnimatePresence>
+        )}</AnimatePresence>
 
       {/* ── HUD Header ──────────────────────────────────────────── */}
       <div className="relative z-10 flex items-start justify-between px-6 pt-5 pb-3 border-b border-cyan-500/10">
