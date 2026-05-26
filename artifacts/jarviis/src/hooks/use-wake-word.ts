@@ -1,26 +1,21 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 
-export type WakeWordState = "standby" | "activated" | "listening" | "off";
+export type WakeWordState = "standby" | "activated" | "listening" | "off" | "denied";
 
 interface UseWakeWordOptions {
-  enabled: boolean;
   onCommand: (transcript: string) => void;
   wakeWords?: string[];
 }
 
-const WAKE_WORDS = ["jarvis", "jarviis", "hey jarvis", "ok jarvis", "jarvis,"];
+const WAKE_WORDS = ["jarvis", "jarviis", "hey jarvis", "ok jarvis"];
 
-export function useWakeWord({
-  enabled,
-  onCommand,
-  wakeWords = WAKE_WORDS,
-}: UseWakeWordOptions) {
-  const [wakeState, setWakeState] = useState<WakeWordState>("off");
+export function useWakeWord({ onCommand, wakeWords = WAKE_WORDS }: UseWakeWordOptions) {
+  const [wakeState, setWakeState]       = useState<WakeWordState>("standby");
   const [liveTranscript, setLiveTranscript] = useState("");
-  const [supported, setSupported] = useState(true);
+  const [supported, setSupported]       = useState(true);
 
   const recognitionRef   = useRef<SpeechRecognition | null>(null);
-  const wakeStateRef     = useRef<WakeWordState>("off");
+  const wakeStateRef     = useRef<WakeWordState>("standby");
   const restartTimerRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
   const commandBufferRef = useRef("");
   const silenceTimerRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -33,7 +28,8 @@ export function useWakeWord({
 
   const startRec = useCallback(() => {
     const rec = recognitionRef.current;
-    if (!rec || !mountedRef.current || wakeStateRef.current === "off") return;
+    if (!rec || !mountedRef.current) return;
+    if (wakeStateRef.current === "off" || wakeStateRef.current === "denied") return;
     try { rec.start(); } catch { /* already running */ }
   }, []);
 
@@ -42,9 +38,8 @@ export function useWakeWord({
     restartTimerRef.current = setTimeout(startRec, ms);
   }, [startRec]);
 
-  /** Called by clap detector to skip the wake-word step */
   const forceActivate = useCallback(() => {
-    if (wakeStateRef.current === "off") return;
+    if (wakeStateRef.current === "off" || wakeStateRef.current === "denied") return;
     setWS("activated");
     commandBufferRef.current = "";
     setLiveTranscript("");
@@ -52,11 +47,6 @@ export function useWakeWord({
 
   useEffect(() => {
     mountedRef.current = true;
-
-    if (!enabled) {
-      setWS("off");
-      return;
-    }
 
     const SpeechAPI =
       (window as Window).SpeechRecognition ||
@@ -69,10 +59,10 @@ export function useWakeWord({
     }
 
     const rec = new SpeechAPI();
-    rec.continuous = true;
-    rec.interimResults = true;
-    // en-IN = Indian English — correctly hears "JARVIS" + Hinglish commands
-    rec.lang = "en-IN";
+    rec.continuous      = true;
+    rec.interimResults  = true;
+    // en-IN = Indian English — catches "JARVIS" perfectly + Hinglish commands
+    rec.lang            = "en-IN";
     rec.maxAlternatives = 3;
     recognitionRef.current = rec;
 
@@ -80,7 +70,7 @@ export function useWakeWord({
       if (!mountedRef.current) return;
 
       let interim = "";
-      let final = "";
+      let final   = "";
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const t = event.results[i][0].transcript.toLowerCase().trim();
         if (event.results[i].isFinal) final += t + " ";
@@ -93,28 +83,20 @@ export function useWakeWord({
         outer: for (let i = event.resultIndex; i < event.results.length; i++) {
           for (let j = 0; j < event.results[i].length; j++) {
             const alt = event.results[i][j].transcript.toLowerCase();
-            if (wakeWords.some(w => alt.includes(w))) {
-              detected = true;
-              break outer;
-            }
+            if (wakeWords.some(w => alt.includes(w))) { detected = true; break outer; }
           }
         }
         if (detected) {
           setWS("activated");
           commandBufferRef.current = "";
           setLiveTranscript("");
-          const afterWake = wakeWords
-            .reduce((t, w) => t.replace(w, ""), fullText)
-            .trim();
+          const afterWake = wakeWords.reduce((t, w) => t.replace(w, ""), fullText).trim();
           if (afterWake.length > 2) {
             commandBufferRef.current = afterWake;
             setLiveTranscript(afterWake);
           }
         }
-      } else if (
-        wakeStateRef.current === "activated" ||
-        wakeStateRef.current === "listening"
-      ) {
+      } else if (wakeStateRef.current === "activated" || wakeStateRef.current === "listening") {
         setWS("listening");
         commandBufferRef.current = fullText;
         setLiveTranscript(fullText);
@@ -134,12 +116,9 @@ export function useWakeWord({
 
     rec.onerror = (event: SpeechRecognitionErrorEvent) => {
       if (!mountedRef.current) return;
-      if (
-        event.error === "not-allowed" ||
-        event.error === "service-not-allowed"
-      ) {
+      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
         setSupported(false);
-        setWS("off");
+        setWS("denied");
         return;
       }
       if (event.error === "aborted") return;
@@ -148,20 +127,22 @@ export function useWakeWord({
 
     rec.onend = () => {
       if (!mountedRef.current) return;
-      if (wakeStateRef.current !== "off") scheduleRestart(100);
+      if (wakeStateRef.current !== "off" && wakeStateRef.current !== "denied") {
+        scheduleRestart(100);
+      }
     };
 
+    // Start immediately — SpeechRecognition shows its own mic permission popup
     setWS("standby");
     startRec();
 
     return () => {
       mountedRef.current = false;
       if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
-      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      if (silenceTimerRef.current)  clearTimeout(silenceTimerRef.current);
       try { rec.abort(); } catch { /* ignore */ }
-      wakeStateRef.current = "off";
     };
-  }, [enabled]);
+  }, []);
 
   return { wakeState, liveTranscript, supported, forceActivate };
 }

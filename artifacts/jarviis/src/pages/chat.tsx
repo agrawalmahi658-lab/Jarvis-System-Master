@@ -45,12 +45,6 @@ export default function Chat() {
   const [input, setInput]             = useState("");
   const [orbState, setOrbState]       = useState<"idle"|"listening"|"thinking"|"speaking">("idle");
 
-  // ── Mic state ─────────────────────────────────────────────────
-  const [micEnabled, setMicEnabled]   = useState(false);
-  const [micStream,  setMicStream]    = useState<MediaStream | null>(null);
-  const [micError,   setMicError]     = useState<string | null>(null);
-  const [micLoading, setMicLoading]   = useState(false);
-
   const messagesEndRef    = useRef<HTMLDivElement>(null);
   const conversationIdRef = useRef<number | null>(null);
   const queryClient       = useQueryClient();
@@ -59,37 +53,6 @@ export default function Chat() {
   const now               = useTime();
 
   useEffect(() => { conversationIdRef.current = conversationId; }, [conversationId]);
-
-  // ── Request mic permission ─────────────────────────────────────
-  const enableMic = useCallback(async () => {
-    setMicLoading(true);
-    setMicError(null);
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-        },
-      });
-      setMicStream(stream);
-      setMicEnabled(true);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("denied") || msg.includes("Permission") || msg.includes("NotAllowed")) {
-        setMicError("Microphone blocked — allow in browser settings, then refresh.");
-      } else {
-        setMicError("Mic unavailable: " + msg);
-      }
-    } finally {
-      setMicLoading(false);
-    }
-  }, []);
-
-  // ── Auto-request mic on first load (browser shows its own popup) ─
-  useEffect(() => {
-    enableMic();
-  }, []);
 
   // ── Send message ───────────────────────────────────────────────
   const sendMessage = useCallback(async (text: string) => {
@@ -161,21 +124,16 @@ export default function Chat() {
     }
   }, [queryClient, speak, stop]);
 
-  // ── Wake word (only when mic enabled) ─────────────────────────
+  // ── Wake word — starts immediately, handles its own mic permission
   const sendRef = useRef(sendMessage);
   useEffect(() => { sendRef.current = sendMessage; }, [sendMessage]);
 
   const { wakeState, liveTranscript, supported, forceActivate } = useWakeWord({
-    enabled: micEnabled,
     onCommand: (t) => sendRef.current(t),
   });
 
-  // ── Clap detection (reuses same stream) ───────────────────────
-  const { clapState } = useClapDetect({
-    enabled: micEnabled,
-    stream: micStream,
-    onDoubleClap: forceActivate,
-  });
+  // ── Clap detection — independent stream, non-blocking ─────────
+  const { clapState, clapEnabled } = useClapDetect(forceActivate);
 
   // Mirror wake state → orb
   useEffect(() => {
@@ -257,28 +215,21 @@ export default function Chat() {
         transition={{ duration: 8, repeat: Infinity, ease: "linear" }}
       />
 
-      {/* ── Mic error banner (only if denied/blocked) ───────────── */}
+      {/* ── Mic denied banner ────────────────────────────────────── */}
       <AnimatePresence>
-        {micError && (
+        {wakeState === "denied" && (
           <motion.div
-            key="mic-err"
+            key="mic-denied"
             initial={{ opacity: 0, y: -20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -20 }}
-            className="fixed top-0 inset-x-0 z-50 flex items-center justify-between gap-3 px-5 py-2 bg-red-950/90 border-b border-red-500/30 text-[10px] tracking-widest text-red-300 uppercase"
+            className="fixed top-0 inset-x-0 z-50 flex items-center gap-3 px-5 py-2 bg-red-950/90 border-b border-red-500/30 text-[10px] tracking-widest text-red-300 uppercase"
           >
-            <span className="flex items-center gap-2">
-              <MicOff size={12} />
-              {micError}
-            </span>
-            <button
-              onClick={enableMic}
-              className="text-red-200 hover:text-white border border-red-500/40 px-3 py-1 hover:border-red-300 transition-colors"
-            >
-              Retry
-            </button>
+            <MicOff size={12} />
+            Microphone blocked — allow in browser settings, then refresh to enable voice
           </motion.div>
-        )}</AnimatePresence>
+        )}
+      </AnimatePresence>
 
       {/* ── HUD Header ──────────────────────────────────────────── */}
       <div className="relative z-10 flex items-start justify-between px-6 pt-5 pb-3 border-b border-cyan-500/10">
@@ -294,20 +245,20 @@ export default function Chat() {
             <HudStat
               label="VOICE"
               value={
-                !micEnabled ? "DISABLED" :
-                wakeState === "off" ? "OFF" :
-                isListening ? "LISTENING" : "STANDBY"
+                wakeState === "denied"   ? "DENIED"    :
+                wakeState === "off"      ? "OFF"       :
+                isListening              ? "LISTENING" : "STANDBY"
               }
-              ok={micEnabled && wakeState !== "off"}
+              ok={wakeState !== "off" && wakeState !== "denied"}
             />
             <HudStat
               label="CLAP"
               value={
-                clapState === "inactive" ? "OFF" :
-                clapState === "clap1"    ? "1×…" :
-                clapState === "activated"? "2×!" : "READY"
+                !clapEnabled             ? "OFF"   :
+                clapState === "clap1"    ? "1×…"   :
+                clapState === "activated"? "2×!"   : "READY"
               }
-              ok={clapState === "ready" || clapState === "clap1" || clapState === "activated"}
+              ok={clapEnabled && clapState !== "inactive"}
             />
           </div>
         </div>
@@ -347,18 +298,6 @@ export default function Chat() {
           <div className="mt-2 text-[9px] tracking-widest text-cyan-700">
             USER: <span className="text-cyan-400">{userName.toUpperCase()}</span>
           </div>
-          {micEnabled && (
-            <button
-              onClick={() => {
-                micStream?.getTracks().forEach(t => t.stop());
-                setMicEnabled(false);
-                setMicStream(null);
-              }}
-              className="text-[9px] tracking-widest text-cyan-900 hover:text-cyan-600 transition-colors mt-1 uppercase"
-            >
-              Disable Voice
-            </button>
-          )}
         </div>
       </div>
 
@@ -378,7 +317,7 @@ export default function Chat() {
             {getGreeting()}, {userName}.
           </motion.p>
           <p className="text-[10px] tracking-[0.4em] text-cyan-600 uppercase">
-            {micEnabled && supported
+            {supported && wakeState !== "denied"
               ? 'Say "JARVIS" · Double clap · or type'
               : "Type a command below"}
           </p>
@@ -460,18 +399,11 @@ export default function Chat() {
                 <span className="w-1.5 h-1.5 rounded-full bg-yellow-400 animate-pulse" />
                 One clap detected — clap again to activate
               </motion.div>
-            ) : micEnabled && supported ? (
+            ) : supported && wakeState !== "denied" ? (
               <motion.div key="sb" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
                 className="flex items-center gap-2 text-[9px] tracking-widest text-cyan-700 uppercase px-1">
                 <span className="w-1 h-1 rounded-full bg-cyan-700" />
                 Say "JARVIS" or double clap to activate voice
-              </motion.div>
-            ) : !micEnabled ? (
-              <motion.div key="nmic" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                className="flex items-center gap-2 text-[9px] tracking-widest text-cyan-800 uppercase px-1">
-                <span className="w-1 h-1 rounded-full bg-cyan-900" />
-                Voice disabled — type below or&nbsp;
-                <button onClick={enableMic} className="text-cyan-600 hover:text-cyan-400 underline">enable</button>
               </motion.div>
             ) : null}
           </AnimatePresence>
@@ -482,7 +414,7 @@ export default function Chat() {
             <HudCorner position="br" size={10} className="bottom-0 right-0" />
 
             <div className={`flex-shrink-0 transition-colors duration-300 ${
-              isListening ? "text-red-400" : micEnabled ? "text-cyan-500" : "text-cyan-900"
+              isListening ? "text-red-400" : wakeState !== "off" && wakeState !== "denied" ? "text-cyan-500" : "text-cyan-900"
             }`}>
               {isListening ? <MicOff size={18} /> : <Mic size={18} />}
             </div>
@@ -493,7 +425,7 @@ export default function Chat() {
               onKeyDown={e => e.key === "Enter" && !e.shiftKey && sendMessage(input)}
               placeholder={
                 isListening ? "Listening…" :
-                micEnabled && supported ? 'Say "JARVIS" · double clap · or type…' :
+                supported && wakeState !== "denied" ? 'Say "JARVIS" · double clap · or type…' :
                 "Type a command…"
               }
               className="flex-1 bg-transparent border-none focus-visible:ring-0 text-cyan-100 placeholder:text-cyan-900 font-sans text-sm"

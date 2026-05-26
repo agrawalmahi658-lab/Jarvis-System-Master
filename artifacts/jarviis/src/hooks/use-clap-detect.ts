@@ -2,22 +2,9 @@ import { useEffect, useRef, useState, useCallback } from "react";
 
 export type ClapState = "inactive" | "ready" | "clap1" | "activated";
 
-interface UseClapDetectOptions {
-  enabled: boolean;
-  stream: MediaStream | null; // reuse already-granted stream
-  onDoubleClap: () => void;
-  threshold?: number;
-  doubleClapWindow?: number;
-}
-
-export function useClapDetect({
-  enabled,
-  stream,
-  onDoubleClap,
-  threshold = 0.2,
-  doubleClapWindow = 700,
-}: UseClapDetectOptions) {
-  const [clapState, setClapState] = useState<ClapState>("inactive");
+export function useClapDetect(onDoubleClap: () => void, threshold = 0.22, doubleClapWindow = 700) {
+  const [clapState, setClapState]   = useState<ClapState>("inactive");
+  const [clapEnabled, setClapEnabled] = useState(false);
 
   const audioCtxRef   = useRef<AudioContext | null>(null);
   const rafRef        = useRef<number>(0);
@@ -26,26 +13,20 @@ export function useClapDetect({
   const prevRmsRef    = useRef(0);
   const cooldownRef   = useRef(false);
   const clapStateRef  = useRef<ClapState>("inactive");
+  const streamRef     = useRef<MediaStream | null>(null);
 
   const setCS = useCallback((s: ClapState) => {
     clapStateRef.current = s;
     if (mountedRef.current) setClapState(s);
   }, []);
 
-  useEffect(() => {
-    mountedRef.current = true;
-    if (!enabled || !stream) {
-      setCS("inactive");
-      return;
-    }
-
+  // Kick off AudioContext clap loop given an already-open stream
+  const startLoop = useCallback((stream: MediaStream) => {
     let ctx: AudioContext;
     try {
       ctx = new AudioContext();
       audioCtxRef.current = ctx;
-    } catch {
-      return;
-    }
+    } catch { return; }
 
     const source   = ctx.createMediaStreamSource(stream);
     const analyser = ctx.createAnalyser();
@@ -64,12 +45,11 @@ export function useClapDetect({
       for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
       const rms = Math.sqrt(sum / buf.length);
 
-      // Spike: loud now, quiet before → clap
       const isSpike = rms > threshold && prevRmsRef.current < threshold * 0.4;
 
       if (isSpike && !cooldownRef.current) {
         cooldownRef.current = true;
-        setTimeout(() => { cooldownRef.current = false; }, 100);
+        setTimeout(() => { cooldownRef.current = false; }, 120);
 
         const now = Date.now();
         const gap = now - lastClapRef.current;
@@ -78,15 +58,12 @@ export function useClapDetect({
           lastClapRef.current = 0;
           setCS("activated");
           onDoubleClap();
-          setTimeout(() => {
-            if (mountedRef.current) setCS("ready");
-          }, 1200);
+          setTimeout(() => { if (mountedRef.current) setCS("ready"); }, 1200);
         } else {
           lastClapRef.current = now;
           setCS("clap1");
           setTimeout(() => {
-            if (mountedRef.current && clapStateRef.current === "clap1")
-              setCS("ready");
+            if (mountedRef.current && clapStateRef.current === "clap1") setCS("ready");
           }, doubleClapWindow + 50);
         }
       }
@@ -96,13 +73,35 @@ export function useClapDetect({
 
     setCS("ready");
     loop();
+  }, [onDoubleClap, threshold, doubleClapWindow, setCS]);
+
+  // Attempt to get mic for clap detection (separate from SpeechRecognition)
+  const enableClap = useCallback(async () => {
+    if (!navigator.mediaDevices?.getUserMedia) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+      });
+      streamRef.current = stream;
+      setClapEnabled(true);
+      startLoop(stream);
+    } catch {
+      // Clap detection unavailable — wake word still works independently
+    }
+  }, [startLoop]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    // Try to enable clap automatically (non-blocking — won't affect wake word)
+    enableClap();
 
     return () => {
       mountedRef.current = false;
       cancelAnimationFrame(rafRef.current);
-      ctx.close();
+      audioCtxRef.current?.close();
+      streamRef.current?.getTracks().forEach(t => t.stop());
     };
-  }, [enabled, stream]);
+  }, []);
 
-  return { clapState };
+  return { clapState, clapEnabled };
 }
