@@ -5,10 +5,11 @@ import { HudCorner } from "@/components/hud-corner";
 import { ParticleBackground } from "@/components/particle-background";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { Mic, MicOff, Send } from "lucide-react";
+import { Mic, MicOff, Send, X } from "lucide-react";
 import { useWakeWord } from "@/hooks/use-wake-word";
 import { useClapDetect } from "@/hooks/use-clap-detect";
 import { useTTS } from "@/hooks/use-tts";
+import { parseAndStrip, executeActions, MODE_META, type SmartMode } from "@/lib/parse-actions";
 import {
   useCreateOpenaiConversation,
   useListOpenaiMessages,
@@ -38,21 +39,43 @@ function useTime() {
   return time;
 }
 
+const SMART_MODES: { key: Exclude<SmartMode, null>; emoji: string }[] = [
+  { key: "focus",  emoji: "🎯" },
+  { key: "coding", emoji: "💻" },
+  { key: "study",  emoji: "📚" },
+  { key: "work",   emoji: "💼" },
+  { key: "movie",  emoji: "🎬" },
+  { key: "gaming", emoji: "🎮" },
+  { key: "sleep",  emoji: "🌙" },
+];
+
 export default function Chat() {
-  const [userName, setUserName]       = useState("Guest");
+  const [userName, setUserName]           = useState("Guest");
   const [conversationId, setConversationId] = useState<number | null>(null);
-  const [messages, setMessages]       = useState<Message[]>([]);
-  const [input, setInput]             = useState("");
-  const [orbState, setOrbState]       = useState<"idle"|"listening"|"thinking"|"speaking">("idle");
+  const [messages, setMessages]           = useState<Message[]>([]);
+  const [input, setInput]                 = useState("");
+  const [orbState, setOrbState]           = useState<"idle"|"listening"|"thinking"|"speaking">("idle");
+  const [activeMode, setActiveMode]       = useState<SmartMode>(null);
+  const [modeToast, setModeToast]         = useState<string | null>(null);
 
   const messagesEndRef    = useRef<HTMLDivElement>(null);
   const conversationIdRef = useRef<number | null>(null);
+  const modeToastTimer    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const queryClient       = useQueryClient();
   const createConv        = useCreateOpenaiConversation();
   const { speak, stop }   = useTTS();
   const now               = useTime();
 
   useEffect(() => { conversationIdRef.current = conversationId; }, [conversationId]);
+
+  const triggerMode = useCallback((mode: SmartMode) => {
+    if (!mode) return;
+    setActiveMode(mode);
+    const meta = MODE_META[mode];
+    setModeToast(meta.desc);
+    if (modeToastTimer.current) clearTimeout(modeToastTimer.current);
+    modeToastTimer.current = setTimeout(() => setModeToast(null), 4000);
+  }, []);
 
   // ── Send message ───────────────────────────────────────────────
   const sendMessage = useCallback(async (text: string) => {
@@ -83,10 +106,10 @@ export default function Chat() {
       if (!response.body) throw new Error("No body");
 
       setOrbState("speaking");
-      const reader = response.body.getReader();
+      const reader  = response.body.getReader();
       const decoder = new TextDecoder();
-      let fullResponse = "";
-      let done = false;
+      let rawFull   = "";
+      let done      = false;
 
       while (!done) {
         const { value, done: readerDone } = await reader.read();
@@ -97,22 +120,30 @@ export default function Chat() {
               try {
                 const data = JSON.parse(line.slice(6));
                 if (data.content) {
-                  fullResponse += data.content;
+                  rawFull += data.content;
+                  // Strip action tags before displaying — keep UI clean
+                  const { clean } = parseAndStrip(rawFull);
                   setMessages(prev =>
-                    prev.map(m =>
-                      m.id === asstMsgId
-                        ? { ...m, content: m.content + data.content }
-                        : m
-                    )
+                    prev.map(m => m.id === asstMsgId ? { ...m, content: clean } : m)
                   );
                 }
-              } catch { /* partial */ }
+              } catch { /* partial chunk */ }
             }
           }
         }
       }
 
-      if (fullResponse.trim()) speak(fullResponse);
+      // Once stream complete — parse and execute all actions
+      const { clean, actions } = parseAndStrip(rawFull);
+      const newMode = executeActions(actions);
+      if (newMode) triggerMode(newMode);
+
+      // Final clean message in state
+      setMessages(prev =>
+        prev.map(m => m.id === asstMsgId ? { ...m, content: clean } : m)
+      );
+
+      if (clean.trim()) speak(clean);
 
       queryClient.invalidateQueries({
         queryKey: getListOpenaiMessagesQueryKey(convId),
@@ -122,9 +153,9 @@ export default function Chat() {
     } finally {
       setOrbState("idle");
     }
-  }, [queryClient, speak, stop]);
+  }, [queryClient, speak, stop, triggerMode]);
 
-  // ── Wake word — starts immediately, handles its own mic permission
+  // ── Wake word ─────────────────────────────────────────────────
   const sendRef = useRef(sendMessage);
   useEffect(() => { sendRef.current = sendMessage; }, [sendMessage]);
 
@@ -132,38 +163,29 @@ export default function Chat() {
     onCommand: (t) => sendRef.current(t),
   });
 
-  // ── Clap detection — independent stream, non-blocking ─────────
+  // ── Clap detection ────────────────────────────────────────────
   const { clapState, clapEnabled } = useClapDetect(forceActivate);
 
   // Mirror wake state → orb
   useEffect(() => {
-    if (wakeState === "activated" || wakeState === "listening") {
-      setOrbState("listening");
-    }
+    if (wakeState === "activated" || wakeState === "listening") setOrbState("listening");
   }, [wakeState]);
 
-  // Show live transcript in input
   useEffect(() => {
     if (liveTranscript) setInput(liveTranscript);
   }, [liveTranscript]);
 
   // ── Init conversation ──────────────────────────────────────────
   useEffect(() => {
-    const name =
-      localStorage.getItem("jarvis_user_name") ||
-      localStorage.getItem("jarviis_user_name");
+    const name = localStorage.getItem("jarvis_user_name") || localStorage.getItem("jarviis_user_name");
     if (name) setUserName(name);
 
     (async () => {
-      const stored =
-        localStorage.getItem("jarvis_conversation_id") ||
-        localStorage.getItem("jarviis_conversation_id");
+      const stored = localStorage.getItem("jarvis_conversation_id") || localStorage.getItem("jarviis_conversation_id");
       if (stored) {
         setConversationId(Number(stored));
       } else {
-        const conv = await createConv.mutateAsync({
-          data: { title: "JARVIS Session" },
-        });
+        const conv = await createConv.mutateAsync({ data: { title: "JARVIS Session" } });
         setConversationId(conv.id);
         localStorage.setItem("jarvis_conversation_id", String(conv.id));
       }
@@ -179,13 +201,11 @@ export default function Chat() {
 
   useEffect(() => {
     if (history) {
-      setMessages(
-        history.map(m => ({
-          id: String(m.id),
-          role: m.role as "user" | "assistant",
-          content: m.content,
-        }))
-      );
+      setMessages(history.map(m => ({
+        id: String(m.id),
+        role: m.role as "user" | "assistant",
+        content: m.content,
+      })));
     }
   }, [history]);
 
@@ -195,16 +215,16 @@ export default function Chat() {
 
   const isListening  = wakeState === "activated" || wakeState === "listening";
   const isProcessing = orbState === "thinking" || orbState === "speaking";
+  const modeMeta     = activeMode ? MODE_META[activeMode] : null;
 
-  const timeStr = now.toLocaleTimeString("en-IN", {
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
-  });
-  const dateStr = now
-    .toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })
-    .toUpperCase();
+  const timeStr = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const dateStr = now.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }).toUpperCase();
 
   return (
-    <div className="h-screen w-full bg-[#020408] text-cyan-50 flex flex-col relative overflow-hidden font-mono select-none">
+    <div
+      className="h-screen w-full bg-[#020408] text-cyan-50 flex flex-col relative overflow-hidden font-mono select-none transition-all duration-1000"
+      style={modeMeta ? { "--mode-color": modeMeta.color } as React.CSSProperties : {}}
+    >
       <div className="hex-grid fixed inset-0 pointer-events-none z-0" />
       <ParticleBackground />
 
@@ -215,18 +235,46 @@ export default function Chat() {
         transition={{ duration: 8, repeat: Infinity, ease: "linear" }}
       />
 
-      {/* ── Mic denied banner ────────────────────────────────────── */}
+      {/* Active mode tint overlay */}
+      <AnimatePresence>
+        {modeMeta && (
+          <motion.div
+            key={activeMode}
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 pointer-events-none z-0"
+            style={{ background: `radial-gradient(ellipse at 50% 0%, ${modeMeta.color}08 0%, transparent 70%)` }}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Mic denied banner */}
       <AnimatePresence>
         {wakeState === "denied" && (
           <motion.div
             key="mic-denied"
-            initial={{ opacity: 0, y: -20 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -20 }}
+            initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }}
             className="fixed top-0 inset-x-0 z-50 flex items-center gap-3 px-5 py-2 bg-red-950/90 border-b border-red-500/30 text-[10px] tracking-widest text-red-300 uppercase"
           >
             <MicOff size={12} />
-            Microphone blocked — allow in browser settings, then refresh to enable voice
+            Microphone blocked — allow in browser settings, then refresh
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Smart Mode toast */}
+      <AnimatePresence>
+        {modeToast && (
+          <motion.div
+            key="mode-toast"
+            initial={{ opacity: 0, y: 40 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 20 }}
+            className="fixed bottom-28 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-6 py-3 rounded-sm border"
+            style={{
+              background: `${modeMeta?.color}12`,
+              borderColor: `${modeMeta?.color}40`,
+              color: modeMeta?.color,
+            }}
+          >
+            <span className="text-[10px] tracking-[0.3em] uppercase">{modeToast}</span>
           </motion.div>
         )}
       </AnimatePresence>
@@ -235,7 +283,7 @@ export default function Chat() {
       <div className="relative z-10 flex items-start justify-between px-6 pt-5 pb-3 border-b border-cyan-500/10">
 
         {/* Left panel */}
-        <div className="flex flex-col gap-1 min-w-[160px]">
+        <div className="flex flex-col gap-1 min-w-[170px]">
           <div className="text-[9px] tracking-[0.25em] text-cyan-600 uppercase">System Time</div>
           <div className="text-lg tracking-widest text-cyan-300 tabular-nums">{timeStr}</div>
           <div className="text-[9px] tracking-[0.2em] text-cyan-700">{dateStr}</div>
@@ -260,11 +308,21 @@ export default function Chat() {
               }
               ok={clapEnabled && clapState !== "inactive"}
             />
+            {activeMode && modeMeta && (
+              <div className="flex items-center gap-2 text-[8px] tracking-widest uppercase mt-1">
+                <span className="w-1 h-1 rounded-full flex-shrink-0 animate-pulse" style={{ backgroundColor: modeMeta.color }} />
+                <span className="text-cyan-800">MODE</span>
+                <span style={{ color: modeMeta.color }}>{modeMeta.label}</span>
+                <button onClick={() => setActiveMode(null)} className="text-cyan-900 hover:text-cyan-700 ml-1">
+                  <X size={8} />
+                </button>
+              </div>
+            )}
           </div>
         </div>
 
-        {/* Center orb */}
-        <div className="flex flex-col items-center gap-3 flex-1">
+        {/* Center orb + title */}
+        <div className="flex flex-col items-center gap-2 flex-1">
           <div className="relative">
             <HudCorner position="tl" size={14} className="top-[-8px] left-[-8px]" />
             <HudCorner position="tr" size={14} className="top-[-8px] right-[-8px]" />
@@ -276,19 +334,45 @@ export default function Chat() {
             <h1 className="text-2xl font-light tracking-[0.5em] text-white hud-glow">JARVIS</h1>
             <div className="flex items-center gap-2 text-[9px] tracking-[0.3em] text-cyan-400 uppercase">
               <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${
-                orbState === "idle"     ? "bg-cyan-400"   :
-                orbState === "listening"? "bg-red-400"    :
-                orbState === "thinking" ? "bg-violet-400" : "bg-cyan-300"
+                orbState === "idle"      ? "bg-cyan-400"   :
+                orbState === "listening" ? "bg-red-400"    :
+                orbState === "thinking"  ? "bg-violet-400" : "bg-cyan-300"
               }`} />
               {orbState === "idle"      ? "STANDBY"   :
                orbState === "listening" ? "LISTENING"  :
                orbState === "thinking"  ? "PROCESSING" : "RESPONDING"}
             </div>
           </div>
+
+          {/* Smart Mode quick-launch */}
+          <div className="flex items-center gap-1 mt-1 flex-wrap justify-center">
+            {SMART_MODES.map(({ key, emoji }) => {
+              const meta = MODE_META[key];
+              const isActive = activeMode === key;
+              return (
+                <button
+                  key={key}
+                  onClick={() => {
+                    triggerMode(key);
+                    sendMessage(`Activate ${key} mode`);
+                  }}
+                  title={meta.label}
+                  className={`text-[9px] tracking-widest uppercase px-2 py-0.5 border transition-all duration-300 ${
+                    isActive
+                      ? "border-current"
+                      : "border-cyan-900/60 text-cyan-900 hover:border-cyan-700 hover:text-cyan-700"
+                  }`}
+                  style={isActive ? { color: meta.color, borderColor: `${meta.color}80` } : {}}
+                >
+                  {emoji} {meta.label}
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         {/* Right panel */}
-        <div className="flex flex-col gap-1 min-w-[160px] items-end">
+        <div className="flex flex-col gap-1 min-w-[170px] items-end">
           <div className="text-[9px] tracking-[0.25em] text-cyan-600 uppercase">Neural Status</div>
           <div className="flex flex-col gap-0.5 items-end mt-1">
             <HudBar label="COGNITION" pct={94} />
@@ -298,15 +382,18 @@ export default function Chat() {
           <div className="mt-2 text-[9px] tracking-widest text-cyan-700">
             USER: <span className="text-cyan-400">{userName.toUpperCase()}</span>
           </div>
+          <div className="mt-2 flex flex-col gap-0.5 items-end text-[8px] tracking-wider text-cyan-900 uppercase">
+            <span>Try: "Open Spotify"</span>
+            <span>Try: "Search Python tips"</span>
+            <span>Try: "Activate coding mode"</span>
+          </div>
         </div>
       </div>
 
       {/* ── Empty state ──────────────────────────────────────────── */}
       {messages.length === 0 && (
         <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ delay: 0.3 }}
+          initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.3 }}
           className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none z-0 gap-3"
         >
           <motion.p
@@ -325,13 +412,12 @@ export default function Chat() {
       )}
 
       {/* ── Messages ─────────────────────────────────────────────── */}
-      <div className="flex-1 overflow-y-auto px-6 md:px-16 lg:px-32 pb-40 z-10 no-scrollbar">
+      <div className="flex-1 overflow-y-auto px-6 md:px-16 lg:px-32 pb-44 z-10 no-scrollbar">
         <div className="max-w-3xl mx-auto flex flex-col gap-5 pt-5">
           {messages.map((m, idx) => (
             <motion.div
               key={m.id}
-              initial={{ opacity: 0, y: 12 }}
-              animate={{ opacity: 1, y: 0 }}
+              initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}
               className={`flex ${m.role === "user" ? "justify-end" : "justify-start gap-3"}`}
             >
               {m.role === "assistant" && (
@@ -366,8 +452,7 @@ export default function Chat() {
                   <div className="mt-2 flex gap-0.5 items-end h-3">
                     {[1,2,3,4,5,4,3].map((h, i) => (
                       <motion.div
-                        key={i}
-                        className="w-0.5 bg-cyan-400 rounded-full"
+                        key={i} className="w-0.5 bg-cyan-400 rounded-full"
                         animate={{ height: [`${h * 10}%`, "100%", `${h * 10}%`] }}
                         transition={{ duration: 0.6, repeat: Infinity, delay: i * 0.08 }}
                       />
@@ -385,7 +470,6 @@ export default function Chat() {
       <div className="absolute bottom-0 inset-x-0 z-20 bg-gradient-to-t from-[#020408] via-[#020408]/95 to-transparent px-6 pb-5 pt-8">
         <div className="max-w-3xl mx-auto flex flex-col gap-2">
 
-          {/* Status line */}
           <AnimatePresence mode="wait">
             {isListening ? (
               <motion.div key="ls" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
@@ -403,12 +487,11 @@ export default function Chat() {
               <motion.div key="sb" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
                 className="flex items-center gap-2 text-[9px] tracking-widest text-cyan-700 uppercase px-1">
                 <span className="w-1 h-1 rounded-full bg-cyan-700" />
-                Say "JARVIS" or double clap to activate voice
+                Say "JARVIS" or double clap · open apps · activate modes
               </motion.div>
             ) : null}
           </AnimatePresence>
 
-          {/* Input bar */}
           <div className="hud-input-bar rounded-sm flex items-center gap-3 px-4 py-2.5 relative">
             <HudCorner position="tl" size={10} className="top-0 left-0" />
             <HudCorner position="br" size={10} className="bottom-0 right-0" />
@@ -425,7 +508,7 @@ export default function Chat() {
               onKeyDown={e => e.key === "Enter" && !e.shiftKey && sendMessage(input)}
               placeholder={
                 isListening ? "Listening…" :
-                supported && wakeState !== "denied" ? 'Say "JARVIS" · double clap · or type…' :
+                supported && wakeState !== "denied" ? 'Say "JARVIS" · "Open Spotify" · "Coding mode"…' :
                 "Type a command…"
               }
               className="flex-1 bg-transparent border-none focus-visible:ring-0 text-cyan-100 placeholder:text-cyan-900 font-sans text-sm"
